@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>러닝메이트 — v5</title>
+<title>러닝메이트 — v7</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
@@ -91,9 +91,9 @@
 <div class="frame">
   <!-- READY -->
   <section class="screen active" id="screen-ready">
-    <div class="eyebrow">러닝메이트 · v5</div>
+    <div class="eyebrow">러닝메이트 · v7</div>
     <div class="brand">자동 트리거 러닝</div>
-    <div class="banner">v5: 일시정지 히스테리시스(걷기 오작동·예민한 재시작 해결) · 발화 간섭 방지 · 반환점/막바지 정상화 · 판단기준 혼합(현재+평균).</div>
+    <div class="banner">v7: 정지/재시작 감지 시간 조절 가능 · 정지/재시작 멘트 우선(페이스보다) · 완주 멘트 끝난 뒤 종료.</div>
     <div class="card" style="margin-top:10px">
       <div class="lbl" style="margin-bottom:8px">메이트 성격</div>
       <div class="persona-row">
@@ -118,6 +118,10 @@
       <div class="seg" id="segCheck"><button data-v="45">45초</button><button class="sel" data-v="75">75초</button><button data-v="120">120초</button></div>
       <div class="lbl" style="margin:11px 0 6px">시작 침묵(워밍업) <span class="sub">고정값: 30초</span></div>
       <div class="seg" id="segWarm"><button data-v="15">15초</button><button data-v="20">20초</button><button class="sel" data-v="30">30초</button></div>
+      <div class="lbl" style="margin:11px 0 6px">정지 감지 <span class="sub">멈춤 인식 시간 (짧을수록 빨리 멈춤)</span></div>
+      <div class="seg" id="segPause"><button data-v="7">빠름 7초</button><button class="sel" data-v="10">보통 10초</button><button data-v="15">여유 15초</button></div>
+      <div class="lbl" style="margin:11px 0 6px">재시작 감지 <span class="sub">다시 뛸 때 반응 (둔감할수록 덜 예민)</span></div>
+      <div class="seg" id="segResume"><button data-v="1.5">민감 1.5초</button><button class="sel" data-v="2.5">보통 2.5초</button><button data-v="4">둔감 4초</button></div>
     </div>
     <div class="err" id="errBox"></div>
     <button class="btn btn-go" onclick="startRun()">러닝 시작</button>
@@ -195,8 +199,9 @@ const PV={coach:{rate:0.97,pitch:1.0},friend:{rate:1.05,pitch:1.12}};
 /* ===== 설정값 (3차 고정 기본값) ===== */
 let persona="coach", goalKm=3.0, targetSec=360, sensSec=15, globalGap=20, checkinSec=75, warmupSec=30;
 let judgeBasis="blend"; // 현재/평균/혼합 — 기본 혼합(현재로 반응, 평균과 충돌 시 코칭 보류)
-const PAUSE_SPEED=0.6, PAUSE_SEC=12;    // 이 속도 미만이 PAUSE_SEC 지속 시 자동 일시정지 (걷기 오작동 방지)
-const RESUME_SPEED=1.2, RESUME_SEC=4;   // 재시작은 더 높은 속도가 RESUME_SEC 지속돼야 (히스테리시스 — 예민한 재시작 방지)
+const PAUSE_SPEED=0.6; let PAUSE_SEC=10;   // 이 속도 미만이 PAUSE_SEC 지속 시 자동 일시정지 (설정 가능)
+const RESUME_SPEED=1.0; let RESUME_SEC=2.5;// 재시작: 1.0m/s가 RESUME_SEC 지속 시 (설정 가능)
+let guardUntil=0;                           // 재시작 멘트 우선: 이 시각까지 페이스 코칭 보류
 
 /* ===== 런타임 ===== */
 let muted=false, simMode=false, watchId=null, tickTimer=null, wakeLock=null, isSpeaking=false;
@@ -224,6 +229,7 @@ function bumpTarget(d){targetSec=Math.max(180,Math.min(600,targetSec+d));const m
 function segWire(id,set){document.getElementById(id).addEventListener('click',e=>{if(e.target.dataset.v!==undefined){set(e.target.dataset.v);document.querySelectorAll('#'+id+' button').forEach(b=>b.classList.remove('sel'));e.target.classList.add('sel');}});}
 segWire('segBasis',v=>{judgeBasis=v;});
 segWire('segSens',v=>sensSec=+v);segWire('segGap',v=>globalGap=+v);segWire('segCheck',v=>checkinSec=+v);segWire('segWarm',v=>warmupSec=+v);
+segWire('segPause',v=>PAUSE_SEC=+v);segWire('segResume',v=>RESUME_SEC=+v);
 function toggleMute(){muted=!muted;document.getElementById('muteTog').textContent=muted?"🔇 음성 꺼짐":"🔊 음성 켜짐";if(muted){try{speechSynthesis.cancel();}catch(e){}if(curAudio)try{curAudio.pause();}catch(e){}}}
 
 /* ===== TTS ===== */
@@ -267,13 +273,26 @@ function fireDirect(sit,text,file){
   setTimeout(()=>addLog(clock(t),gap),60);
   return true;
 }
-function firePool(sit){const d=SIT[sit];let pool=d.v[persona]||d.v.coach;const key=sit+"_"+persona;let i;do{i=Math.floor(Math.random()*pool.length);}while(pool.length>1&&i===lastIdx[key]);lastIdx[key]=i;const v=pool[i];return fireDirect(sit,v.t,v.f);}
+/* 셔플백: 한 상황×페르소나의 모든 변형을 다 쓰기 전엔 같은 멘트 반복 안 함 */
+let bags={};
+function pickIndex(key,n){
+  if(n<=1)return 0;
+  if(!bags[key]||bags[key].length===0){
+    let arr=[...Array(n).keys()];
+    for(let i=arr.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[arr[i],arr[j]]=[arr[j],arr[i]];}
+    if(arr[0]===lastIdx[key]&&arr.length>1){[arr[0],arr[1]]=[arr[1],arr[0]];} // 백 경계에서도 직전과 안 겹치게
+    bags[key]=arr;
+  }
+  const idx=bags[key].shift();lastIdx[key]=idx;return idx;
+}
+function firePool(sit){const d=SIT[sit];let pool=d.v[persona]||d.v.coach;const key=sit+"_"+persona;const v=pool[pickIndex(key,pool.length)];return fireDirect(sit,v.t,v.f);}
 function addLog(t,gap){const b=document.getElementById('logBody');const cls=lastSrc==="clova"?"f-ok":lastSrc==="pz"?"f-pz":"f-miss";const lab=lastSrc==="clova"?"클로바":lastSrc==="mute"?"음소거":"TTS";const el=document.createElement('div');el.className='log-item';el.innerHTML='<span class="t">'+t+'</span><span class="gap">+'+gap+'s</span><span class="src '+cls+'">'+lab+'</span><span>'+document.getElementById('coachLine').textContent+'</span>';b.insertBefore(el,b.firstChild);}
 
 /* ===== 코칭 엔진 ===== */
 function evaluate(){
   const t=elapsed();
   if(t<warmupSec)return;        // ① 시작 워밍업
+  if(Date.now()<guardUntil)return; // ①-b 재시작 멘트 우선 구간 — 페이스 코칭 보류
   if(isSpeaking)return;         // ② 발화 중 금지
   if(t-lastSpeakAt<globalGap)return; // ③ 전역 최소 간격
 
@@ -321,16 +340,23 @@ function enterPause(reason){
 function exitPause(reason){
   if(!paused)return;
   pausedAccumMs+=Date.now()-pauseStartMs;paused=false;lastAbovePauseMs=Date.now();moveStreakStart=0;
+  guardUntil=Date.now()+3500;                  // ★ 재시작 멘트 우선: 이 동안 페이스 코칭 보류
   const b=document.getElementById('gpsBadge');b.className="gps ok";b.textContent=simMode?"시뮬레이션":"GPS 보통";
   document.getElementById('paceBig').classList.remove('paused');
   document.getElementById('coach').classList.remove('paused');
   document.getElementById('pauseBtn').textContent="⏸ 일시정지";
   stopSpeaking();                              // ★ 재정비 멘트 끊고
-  setTimeout(()=>{if(!paused)firePool('resume');},300); // 텀 두고 재시작 멘트
+  setTimeout(()=>{if(!paused)firePool('resume');},200); // 짧은 텀 뒤 재시작 멘트(우선)
 }
 function togglePause(reason){ paused?exitPause(reason):enterPause(reason); }
+/* 완주 멘트가 끝날 때까지 기다렸다가 종료 (멘트 잘림 방지) */
+function waitSpeakThenEnd(){
+  const t0=Date.now();
+  const chk=()=>{ if(!isSpeaking || Date.now()-t0>12000){ endRun(); } else { setTimeout(chk,300); } };
+  setTimeout(chk,900); // 발화 시작 여유 후 감시
+}
 /* 일시정지 멘트는 게이팅 무시하고 직접 재생 */
-function firePoolPaused(sit){const d=SIT[sit];let pool=d.v[persona]||d.v.coach;const i=Math.floor(Math.random()*pool.length);const v=pool[i];lastSit[sit]=elapsed();lastSpeakAt=elapsed();document.getElementById('coachWho').textContent="메이트 · "+(persona==="coach"?"코치":"친구");document.getElementById('coachLine').textContent=v.t;lastSrc="pz";speak(v.t,v.f);setTimeout(()=>addLog(clock(elapsed()),0),60);}
+function firePoolPaused(sit){const d=SIT[sit];let pool=d.v[persona]||d.v.coach;const key=sit+"_"+persona;const v=pool[pickIndex(key,pool.length)];lastSit[sit]=elapsed();lastSpeakAt=elapsed();document.getElementById('coachWho').textContent="메이트 · "+(persona==="coach"?"코치":"친구");document.getElementById('coachLine').textContent=v.t;lastSrc="pz";speak(v.t,v.f);setTimeout(()=>addLog(clock(elapsed()),0),60);}
 
 /* ===== GPS ===== */
 function onPos(p){
@@ -372,7 +398,7 @@ function tick(){
   updateMetrics();
   if(goalReached)return;
   // 목표 도달 → 완주 멘트 후 자동 종료
-  if(dist>=goalKm*1000){goalReached=true;fireDirect('goal','목표 '+goalKm.toFixed(1)+'킬로미터 완주! 오늘도 끝까지 잘 해냈어요.','goal_'+persona+'_01');setTimeout(endRun,4500);return;}
+  if(dist>=goalKm*1000){goalReached=true;fireDirect('goal','목표 '+goalKm.toFixed(1)+'킬로미터 완주! 오늘도 끝까지 잘 해냈어요.','goal_'+persona+'_01');waitSpeakThenEnd();return;}
   if(paused){ if(!isSpeaking && Date.now()-pausedMantraAt>50000){pausedMantraAt=Date.now();firePoolPaused('paused');} return; }
   // 자동 일시정지 (GPS 모드 한정) — PAUSE_SPEED 미만이 PAUSE_SEC 지속 시
   if(!simMode&&elapsed()>warmupSec&&lastAbovePauseMs&&Date.now()-lastAbovePauseMs>PAUSE_SEC*1000){enterPause('auto');return;}
